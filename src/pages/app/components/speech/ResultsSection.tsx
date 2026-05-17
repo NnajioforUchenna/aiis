@@ -1,7 +1,15 @@
 import { ChatConversation } from "@/types";
-import { Markdown, Switch, CopyButton } from "@/components";
-import { BotIcon, HeadphonesIcon, Loader2, SparklesIcon } from "lucide-react";
+import { Markdown, CopyButton, ScrollArea, Button } from "@/components";
+import {
+  BotIcon,
+  HeadphonesIcon,
+  Loader2,
+  SparklesIcon,
+  ArrowDownIcon,
+  ClockIcon,
+} from "lucide-react";
 import { cn } from "@/lib/utils";
+import { useEffect, useRef, useState } from "react";
 
 type Props = {
   lastTranscription: string;
@@ -12,6 +20,14 @@ type Props = {
   setConversationMode: (mode: boolean) => void;
 };
 
+function formatTime(timestamp: number) {
+  if (!timestamp) return "";
+  return new Date(timestamp).toLocaleTimeString([], {
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
 export const ResultsSection = ({
   lastTranscription,
   lastAIResponse,
@@ -20,146 +36,249 @@ export const ResultsSection = ({
   conversationMode,
   setConversationMode,
 }: Props) => {
-  const hasResponse = lastAIResponse || isAIProcessing;
-  const hasHistory = conversation.messages.length > 2;
+  const hasLive = !!(lastAIResponse || isAIProcessing);
 
-  if (!hasResponse && !lastTranscription) {
+  // history = all messages after the first two (which are the current live turn)
+  // messages are prepended newest-first: [latestUser, latestAssistant, olderUser, olderAssistant, ...]
+  const historyMessages = conversation.messages.slice(2);
+  const hasPreviousTurns = historyMessages.length > 0;
+
+  // Group history into turns: pair user+assistant together
+  const historyTurns: Array<{ user: (typeof historyMessages)[0]; assistant?: (typeof historyMessages)[0] }> = [];
+  const sorted = [...historyMessages].sort((a, b) => b.timestamp - a.timestamp);
+  for (let i = 0; i < sorted.length; i += 2) {
+    const first = sorted[i];
+    const second = sorted[i + 1];
+    if (first?.role === "assistant") {
+      historyTurns.push({ assistant: first, user: second });
+    } else {
+      historyTurns.push({ user: first, assistant: second });
+    }
+  }
+
+  const liveScrollRef = useRef<HTMLDivElement | null>(null);
+  const [autoScrollPaused, setAutoScrollPaused] = useState(false);
+  const [showJumpBtn, setShowJumpBtn] = useState(false);
+
+  const getLiveViewport = () =>
+    liveScrollRef.current?.querySelector(
+      "[data-slot='scroll-area-viewport']"
+    ) as HTMLElement | null;
+
+  const scrollToBottom = (behavior: ScrollBehavior = "smooth") => {
+    const vp = getLiveViewport();
+    if (!vp) return;
+    vp.scrollTo({ top: vp.scrollHeight, behavior });
+  };
+
+  // Attach scroll listener (unconditional hook)
+  useEffect(() => {
+    if (!hasLive) return;
+    const vp = getLiveViewport();
+    if (!vp) return;
+    const threshold = 24;
+    const onScroll = () => {
+      const dist = vp.scrollHeight - vp.scrollTop - vp.clientHeight;
+      setAutoScrollPaused(dist > threshold);
+      setShowJumpBtn(dist > threshold);
+    };
+    onScroll();
+    vp.addEventListener("scroll", onScroll, { passive: true });
+    return () => vp.removeEventListener("scroll", onScroll);
+  }, [hasLive]);
+
+  // Auto-scroll on new content (unconditional hook)
+  useEffect(() => {
+    if (!hasLive || autoScrollPaused) return;
+    const frame = requestAnimationFrame(() => scrollToBottom("auto"));
+    return () => cancelAnimationFrame(frame);
+  }, [lastAIResponse, isAIProcessing, hasLive, autoScrollPaused]);
+
+  // Nothing to show
+  if (!hasLive && !lastTranscription && !hasPreviousTurns) {
     return null;
   }
 
-  const isMac = navigator.platform.toLowerCase().includes("mac");
-  const modKey = isMac ? "⌘" : "Ctrl";
-
   return (
-    <div className="rounded-lg border border-border/50 bg-muted/20 p-3 space-y-3">
-      {/* Header with toggle */}
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-1.5">
-          <SparklesIcon className="w-3.5 h-3.5 text-primary" />
-          <h4 className="text-xs font-medium">
-            {conversationMode ? "Conversation" : "AI Response"}
-          </h4>
-        </div>
-        <div className="flex items-center gap-2 select-none">
-          <span className="text-[9px] text-muted-foreground/50 bg-muted/50 px-1 rounded">
-            {modKey}+K
-          </span>
-          <Switch
-            checked={conversationMode}
-            onCheckedChange={setConversationMode}
-            className="scale-75"
-          />
-          {lastAIResponse && <CopyButton content={lastAIResponse} />}
-        </div>
-      </div>
+    <div className="flex flex-col gap-2">
 
-      {/* RESPONSE MODE: System as text, then AI response */}
-      {!conversationMode && (
-        <div className="space-y-2">
-          {/* System Input - Just text with bold label */}
-          {lastTranscription && (
-            <p className="text-[11px] text-muted-foreground">
-              <span className="font-semibold">System:</span> {lastTranscription}
-            </p>
-          )}
-
-          {/* AI Response */}
-          {hasResponse && (
-            <div>
-              {isAIProcessing && !lastAIResponse ? (
-                <div className="flex items-center gap-2 py-2">
-                  <Loader2 className="h-4 w-4 animate-spin text-primary" />
-                  <span className="text-xs text-muted-foreground">
-                    Generating response...
-                  </span>
-                </div>
-              ) : (
-                <div className="prose prose-sm max-w-none dark:prose-invert">
-                  <Markdown>{lastAIResponse}</Markdown>
-                  {isAIProcessing && (
-                    <span className="inline-block w-2 h-4 bg-primary animate-pulse ml-1 align-middle" />
-                  )}
-                </div>
+      {/* ── LIVE RESPONSE ── */}
+      {(hasLive || lastTranscription) && (
+        <div className="rounded-lg border border-border/60 bg-card overflow-hidden">
+          {/* Header */}
+          <div className="flex items-center justify-between px-3 py-2 border-b border-border/40 bg-muted/30">
+            <div className="flex items-center gap-1.5">
+              <SparklesIcon className="w-3.5 h-3.5 text-primary" />
+              <span className="text-[11px] font-semibold tracking-wide text-foreground">
+                Live Response
+              </span>
+              {isAIProcessing && (
+                <Loader2 className="h-3 w-3 animate-spin text-muted-foreground ml-1" />
               )}
             </div>
-          )}
+            <div className="flex items-center gap-2">
+              {showJumpBtn && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-5 px-2 text-[10px] gap-1"
+                  onClick={() => {
+                    setAutoScrollPaused(false);
+                    setShowJumpBtn(false);
+                    scrollToBottom();
+                  }}
+                >
+                  <ArrowDownIcon className="h-2.5 w-2.5" />
+                  Latest
+                </Button>
+              )}
+              {lastAIResponse && <CopyButton content={lastAIResponse} />}
+            </div>
+          </div>
+
+          <div className="p-3 space-y-2.5">
+            {/* Current transcription (what was said) */}
+            {lastTranscription && (
+              <div className="flex gap-2 items-start">
+                <div className="flex items-center gap-1 pt-0.5 shrink-0">
+                  <HeadphonesIcon className="h-3 w-3 text-primary" />
+                  <span className="text-[9px] font-semibold text-primary uppercase tracking-wider">
+                    You
+                  </span>
+                </div>
+                <p className="text-[12px] leading-relaxed text-muted-foreground break-words min-w-0 flex-1">
+                  {lastTranscription}
+                </p>
+              </div>
+            )}
+
+            {/* Current AI response (streaming) */}
+            {hasLive && (
+              <div className="flex gap-2 items-start">
+                <div className="flex items-center gap-1 pt-0.5 shrink-0">
+                  <BotIcon className="h-3 w-3 text-blue-500" />
+                  <span className="text-[9px] font-semibold text-blue-500 uppercase tracking-wider">
+                    AI
+                  </span>
+                </div>
+                <div className="min-w-0 flex-1">
+                  {isAIProcessing && !lastAIResponse ? (
+                    <div className="flex items-center gap-1.5 py-1">
+                      <span className="text-[11px] text-muted-foreground italic">
+                        Generating response…
+                      </span>
+                    </div>
+                  ) : (
+                    <ScrollArea ref={liveScrollRef} className="max-h-52">
+                      <div
+                        className={cn(
+                          "text-[12px] leading-[1.75] text-foreground break-words",
+                          "space-y-2 pr-2",
+                          // Fixes prose element spacing
+                          "[&_p]:mb-2 [&_p:last-child]:mb-0",
+                          "[&_ul]:pl-4 [&_ul]:space-y-1 [&_li]:leading-relaxed",
+                          "[&_ol]:pl-4 [&_ol]:space-y-1",
+                          "[&_h1]:text-sm [&_h1]:font-semibold [&_h1]:mt-2",
+                          "[&_h2]:text-[12px] [&_h2]:font-semibold [&_h2]:mt-2",
+                          "[&_h3]:text-[11px] [&_h3]:font-semibold [&_h3]:mt-1",
+                          "[&_code]:text-[11px] [&_code]:bg-muted [&_code]:px-1 [&_code]:rounded",
+                          "[&_pre]:overflow-x-auto [&_pre]:rounded [&_pre]:p-2 [&_pre]:text-[11px]",
+                          "dark:text-foreground"
+                        )}
+                      >
+                        <Markdown isStreaming={isAIProcessing}>
+                          {lastAIResponse}
+                        </Markdown>
+                        {isAIProcessing && (
+                          <span className="inline-block w-1.5 h-3.5 bg-primary animate-pulse ml-0.5 align-middle rounded-sm" />
+                        )}
+                      </div>
+                    </ScrollArea>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
         </div>
       )}
 
-      {/* CONVERSATION MODE: AI on top, then System, then history */}
-      {conversationMode && (
-        <div className="space-y-2">
-          {/* AI Response - First (on top) */}
-          {hasResponse && (
-            <div className="rounded-md bg-background/50 p-2.5">
-              <div className="flex items-center gap-1.5 mb-1">
-                <BotIcon className="h-3 w-3 text-muted-foreground" />
-                <span className="text-[9px] font-medium text-muted-foreground uppercase tracking-wide">
-                  AI
-                </span>
-              </div>
-              {isAIProcessing && !lastAIResponse ? (
-                <div className="flex items-center gap-2">
-                  <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
-                  <span className="text-[10px] text-muted-foreground">
-                    Generating...
-                  </span>
-                </div>
-              ) : (
-                <div className="prose prose-sm max-w-none dark:prose-invert text-sm">
-                  <Markdown>{lastAIResponse}</Markdown>
-                  {isAIProcessing && (
-                    <span className="inline-block w-2 h-4 bg-primary animate-pulse ml-1 align-middle" />
-                  )}
-                </div>
-              )}
+      {/* ── PREVIOUS TURNS ── */}
+      {hasPreviousTurns && (
+        <div className="rounded-lg border border-border/40 bg-muted/10 overflow-hidden">
+          {/* Header */}
+          <div className="flex items-center justify-between px-3 py-2 border-b border-border/30">
+            <div className="flex items-center gap-1.5">
+              <ClockIcon className="w-3 h-3 text-muted-foreground" />
+              <span className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">
+                Previous Turns
+              </span>
+              <span className="text-[9px] text-muted-foreground/60 bg-muted px-1.5 py-0.5 rounded-full">
+                {historyTurns.length}
+              </span>
             </div>
-          )}
+          </div>
 
-          {/* System Input - Second */}
-          {lastTranscription && (
-            <div className="rounded-md border-l-2 border-primary/50 bg-primary/5 p-2.5">
-              <div className="flex items-center gap-1.5 mb-1">
-                <HeadphonesIcon className="h-3 w-3 text-primary" />
-                <span className="text-[9px] font-medium text-primary uppercase tracking-wide">
-                  System
-                </span>
-              </div>
-              <p className="text-sm">{lastTranscription}</p>
-            </div>
-          )}
-
-          {/* Previous Messages */}
-          {hasHistory && (
-            <div className="space-y-2 pt-2 border-t border-border/50">
-              <p className="text-[9px] text-muted-foreground uppercase tracking-wide">
-                Previous
-              </p>
-              <div className="space-y-1.5 max-h-40 overflow-y-auto">
-                {conversation.messages
-                  .slice(2)
-                  .sort((a, b) => b.timestamp - a.timestamp)
-                  .map((message, index) => (
-                    <div
-                      key={message.id || index}
-                      className={cn(
-                        "p-2 rounded-md text-[11px]",
-                        message.role === "user"
-                          ? "bg-primary/5 border-l-2 border-primary/30"
-                          : "bg-background/50"
-                      )}
-                    >
-                      <span className="text-[8px] font-medium text-muted-foreground uppercase">
-                        {message.role === "user" ? "System" : "AI"}
-                      </span>
-                      <div className="text-muted-foreground leading-relaxed mt-0.5">
-                        <Markdown>{message.content}</Markdown>
+          {/* Scrollable history */}
+          <ScrollArea className="max-h-64">
+            <div className="px-3 py-2 space-y-3">
+              {historyTurns.map((turn, idx) => (
+                <div
+                  key={idx}
+                  className="space-y-2 pb-3 border-b border-border/30 last:border-0 last:pb-0"
+                >
+                  {/* User side */}
+                  {turn.user && (
+                    <div className="flex gap-2 items-start">
+                      <div className="flex items-center gap-1 pt-0.5 shrink-0">
+                        <HeadphonesIcon className="h-2.5 w-2.5 text-primary/70" />
+                        <span className="text-[9px] font-semibold text-primary/70 uppercase tracking-wider">
+                          You
+                        </span>
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <p className="text-[11px] leading-relaxed text-muted-foreground break-words">
+                          {turn.user.content}
+                        </p>
+                        {turn.user.timestamp > 0 && (
+                          <span className="text-[9px] text-muted-foreground/40 mt-0.5 block">
+                            {formatTime(turn.user.timestamp)}
+                          </span>
+                        )}
                       </div>
                     </div>
-                  ))}
-              </div>
+                  )}
+                  {/* Assistant side */}
+                  {turn.assistant && (
+                    <div className="flex gap-2 items-start">
+                      <div className="flex items-center gap-1 pt-0.5 shrink-0">
+                        <BotIcon className="h-2.5 w-2.5 text-blue-400" />
+                        <span className="text-[9px] font-semibold text-blue-400 uppercase tracking-wider">
+                          AI
+                        </span>
+                      </div>
+                      <div
+                        className={cn(
+                          "min-w-0 flex-1 text-[11px] leading-[1.7] text-muted-foreground break-words",
+                          "[&_p]:mb-1.5 [&_p:last-child]:mb-0",
+                          "[&_ul]:pl-3.5 [&_ul]:space-y-0.5 [&_li]:leading-relaxed",
+                          "[&_ol]:pl-3.5 [&_ol]:space-y-0.5",
+                          "[&_code]:text-[10px] [&_code]:bg-muted [&_code]:px-1 [&_code]:rounded",
+                          "[&_pre]:overflow-x-auto [&_pre]:rounded [&_pre]:p-1.5 [&_pre]:text-[10px]",
+                        )}
+                      >
+                        <Markdown>{turn.assistant.content}</Markdown>
+                        {turn.assistant.timestamp > 0 && (
+                          <span className="text-[9px] text-muted-foreground/40 mt-1 block">
+                            {formatTime(turn.assistant.timestamp)}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ))}
             </div>
-          )}
+          </ScrollArea>
         </div>
       )}
     </div>

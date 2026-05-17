@@ -224,9 +224,16 @@ export function useSystemAudio() {
       try {
         speechUnlisten = await listen("speech-detected", async (event) => {
           try {
-            if (!capturing) return;
+            console.log("[SystemAudio] speech-detected event received");
+
+            if (!capturing) {
+              console.warn("[SystemAudio] speech-detected fired but capturing=false, ignoring");
+              return;
+            }
 
             const base64Audio = event.payload as string;
+            console.log("[SystemAudio] base64 audio payload length:", base64Audio?.length ?? 0);
+
             // Convert to blob
             const binaryString = atob(base64Audio);
             const bytes = new Uint8Array(binaryString.length);
@@ -234,9 +241,13 @@ export function useSystemAudio() {
               bytes[i] = binaryString.charCodeAt(i);
             }
             const audioBlob = new Blob([bytes], { type: "audio/wav" });
+            console.log("[SystemAudio] audio blob size (bytes):", audioBlob.size);
 
             const usePluelyAPI = await shouldUsePluelyAPI();
+            console.log("[SystemAudio] usePluelyAPI:", usePluelyAPI, "| selectedSttProvider:", selectedSttProvider.provider);
+
             if (!selectedSttProvider.provider && !usePluelyAPI) {
+              console.error("[SystemAudio] No STT provider configured and Pluely API not available");
               setError("No speech provider selected.");
               return;
             }
@@ -244,13 +255,16 @@ export function useSystemAudio() {
             const providerConfig = allSttProviders.find(
               (p) => p.id === selectedSttProvider.provider
             );
+            console.log("[SystemAudio] STT providerConfig found:", !!providerConfig, providerConfig?.id ?? "(none)");
 
             if (!providerConfig && !usePluelyAPI) {
+              console.error("[SystemAudio] STT provider config not found for id:", selectedSttProvider.provider);
               setError("Speech provider config not found.");
               return;
             }
 
             setIsProcessing(true);
+            console.log("[SystemAudio] Starting STT transcription...");
 
             // Add timeout wrapper for STT request (30 seconds)
             const sttPromise = fetchSTT({
@@ -272,6 +286,8 @@ export function useSystemAudio() {
                 timeoutPromise,
               ]);
 
+              console.log("[SystemAudio] STT transcription result:", JSON.stringify(transcription));
+
               if (transcription.trim()) {
                 setLastTranscription(transcription);
                 setError("");
@@ -284,20 +300,23 @@ export function useSystemAudio() {
                   return { role: msg.role, content: msg.content };
                 });
 
+                console.log("[SystemAudio] Sending to AI. History messages:", previousMessages.length);
                 await processWithAI(
                   transcription,
                   effectiveSystemPrompt,
                   previousMessages
                 );
               } else {
+                console.warn("[SystemAudio] STT returned empty transcription");
                 setError("Received empty transcription");
               }
             } catch (sttError: any) {
-              console.error("STT Error:", sttError);
+              console.error("[SystemAudio] STT Error:", sttError?.message ?? sttError, sttError);
               setError(sttError.message || "Failed to transcribe audio");
               setIsPopoverOpen(true);
             }
-          } catch (err) {
+          } catch (err: any) {
+            console.error("[SystemAudio] Unhandled error in speech-detected handler:", err?.message ?? err, err);
             setError("Failed to process speech");
           } finally {
             setIsProcessing(false);
@@ -440,8 +459,8 @@ export function useSystemAudio() {
 
       // Start a new continuous recording session
       await invoke<string>("start_system_audio_capture", {
-        vadConfig: vadConfig,
-        deviceId: deviceId,
+        vad_config: vadConfig,
+        device_id: deviceId,
       });
     } catch (err) {
       console.error("Failed to start continuous recording:", err);
@@ -488,7 +507,10 @@ export function useSystemAudio() {
         let fullResponse = "";
 
         const usePluelyAPI = await shouldUsePluelyAPI();
+        console.log("[SystemAudio] processWithAI — usePluelyAPI:", usePluelyAPI, "| selectedAIProvider:", selectedAIProvider.provider);
+
         if (!selectedAIProvider.provider && !usePluelyAPI) {
+          console.error("[SystemAudio] No AI provider configured and Pluely API not available");
           setError("No AI provider selected.");
           return;
         }
@@ -496,11 +518,16 @@ export function useSystemAudio() {
         const provider = allAiProviders.find(
           (p) => p.id === selectedAIProvider.provider
         );
+        console.log("[SystemAudio] AI providerConfig found:", !!provider, provider?.id ?? "(none)");
+
         if (!provider && !usePluelyAPI) {
+          console.error("[SystemAudio] AI provider config not found for id:", selectedAIProvider.provider);
           setError("AI provider config not found.");
           return;
         }
 
+        console.log("[SystemAudio] Calling fetchAIResponse with message:", transcription.substring(0, 100));
+        let chunkCount = 0;
         try {
           for await (const chunk of fetchAIResponse({
             provider: usePluelyAPI ? undefined : provider,
@@ -510,14 +537,18 @@ export function useSystemAudio() {
             userMessage: transcription,
             imagesBase64: [],
           })) {
+            chunkCount++;
             fullResponse += chunk;
             setLastAIResponse((prev) => prev + chunk);
           }
+          console.log("[SystemAudio] AI streaming complete. Chunks:", chunkCount, "| Total length:", fullResponse.length);
         } catch (aiError: any) {
+          console.error("[SystemAudio] AI streaming error:", aiError?.message ?? aiError, aiError);
           setError(aiError.message || "Failed to get AI response");
         }
 
         if (fullResponse) {
+          console.log("[SystemAudio] Saving conversation with response length:", fullResponse.length);
           const timestamp = Date.now();
           setConversation((prev) => ({
             ...prev,
@@ -539,8 +570,11 @@ export function useSystemAudio() {
             updatedAt: timestamp,
             title: prev.title || generateConversationTitle(transcription),
           }));
+        } else {
+          console.warn("[SystemAudio] AI returned empty response after", chunkCount, "chunks");
         }
-      } catch (err) {
+      } catch (err: any) {
+        console.error("[SystemAudio] Unhandled error in processWithAI:", err?.message ?? err, err);
         setError("Failed to get AI response");
       } finally {
         setIsAIProcessing(false);
@@ -553,15 +587,20 @@ export function useSystemAudio() {
   const startCapture = useCallback(async () => {
     try {
       setError("");
+      console.log("[SystemAudio] startCapture — VAD enabled:", vadConfig.enabled, "| output device:", selectedAudioDevices.output.id);
 
       const hasAccess = await invoke<boolean>("check_system_audio_access");
+      console.log("[SystemAudio] check_system_audio_access result:", hasAccess);
+
       if (!hasAccess) {
+        console.warn("[SystemAudio] No system audio access — showing setup flow");
         setSetupRequired(true);
         setIsPopoverOpen(true);
         return;
       }
 
       const isContinuous = !vadConfig.enabled;
+      console.log("[SystemAudio] mode:", isContinuous ? "continuous" : "VAD");
 
       // Set up conversation
       const conversationId = generateConversationId("sysaudio");
@@ -580,12 +619,14 @@ export function useSystemAudio() {
 
       // If continuous mode
       if (isContinuous) {
+        console.log("[SystemAudio] Continuous mode — waiting for manual start");
         setIsRecordingInContinuousMode(false);
         return;
       }
 
       // VAD mode: Start recording immediately
       // Stop any existing capture
+      console.log("[SystemAudio] Stopping any existing capture before starting new one");
       await invoke<string>("stop_system_audio_capture");
 
       const deviceId =
@@ -593,13 +634,16 @@ export function useSystemAudio() {
           ? selectedAudioDevices.output.id
           : null;
 
+      console.log("[SystemAudio] Invoking start_system_audio_capture | device_id:", deviceId);
       // Start capture with VAD config
       await invoke<string>("start_system_audio_capture", {
-        vadConfig: vadConfig,
-        deviceId: deviceId,
+        vad_config: vadConfig,
+        device_id: deviceId,
       });
-    } catch (err) {
+      console.log("[SystemAudio] start_system_audio_capture invoked successfully");
+    } catch (err: any) {
       const errorMessage = err instanceof Error ? err.message : String(err);
+      console.error("[SystemAudio] startCapture error:", errorMessage, err);
       setError(errorMessage);
       setIsPopoverOpen(true);
     }
@@ -607,6 +651,8 @@ export function useSystemAudio() {
 
   const stopCapture = useCallback(async () => {
     try {
+      console.log("[SystemAudio] stopCapture called");
+
       // Abort any ongoing AI requests
       if (abortControllerRef.current) {
         abortControllerRef.current.abort();
@@ -615,6 +661,7 @@ export function useSystemAudio() {
 
       // Stop the audio capture
       await invoke<string>("stop_system_audio_capture");
+      console.log("[SystemAudio] stop_system_audio_capture invoked successfully");
 
       // Reset ALL states
       setCapturing(false);
@@ -627,10 +674,10 @@ export function useSystemAudio() {
       setLastAIResponse("");
       setError("");
       setIsPopoverOpen(false);
-    } catch (err) {
+    } catch (err: any) {
       const errorMessage = err instanceof Error ? err.message : String(err);
+      console.error("[SystemAudio] stopCapture error:", errorMessage, err);
       setError(`Failed to stop capture: ${errorMessage}`);
-      console.error("Stop capture error:", err);
     }
   }, []);
 

@@ -13,8 +13,10 @@ import { shouldUsePluelyAPI } from "./pluely.api";
 // Pluely STT function
 async function fetchPluelySTT(audio: File | Blob): Promise<string> {
   try {
+    console.log("[STT] fetchPluelySTT — audio size:", audio.size, "type:", audio.type);
     // Convert audio to base64
     const audioBase64 = await blobToBase64(audio);
+    console.log("[STT] fetchPluelySTT — base64 length:", audioBase64.length);
 
     // Call Tauri command
     const response = await invoke<{
@@ -22,16 +24,20 @@ async function fetchPluelySTT(audio: File | Blob): Promise<string> {
       transcription?: string;
       error?: string;
     }>("transcribe_audio", {
-      audioBase64,
+      audio_base64: audioBase64,
     });
+
+    console.log("[STT] fetchPluelySTT — response:", JSON.stringify(response));
 
     if (response.success && response.transcription) {
       return response.transcription;
     } else {
+      console.warn("[STT] fetchPluelySTT — unsuccessful or missing transcription:", response.error);
       return response.error || "Transcription failed";
     }
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
+    console.error("[STT] fetchPluelySTT — invoke error:", errorMessage, error);
     return `Pluely STT Error: ${errorMessage}`;
   }
 }
@@ -53,9 +59,11 @@ export async function fetchSTT(params: STTParams): Promise<string> {
 
   try {
     const { provider, selectedProvider, audio } = params;
+    console.log("[STT] fetchSTT — provider:", provider?.id ?? "(none)", "| audio size:", audio.size);
 
     // Check if we should use Pluely API instead
     const usePluelyAPI = await shouldUsePluelyAPI();
+    console.log("[STT] fetchSTT — usePluelyAPI:", usePluelyAPI);
     if (usePluelyAPI) {
       return await fetchPluelySTT(audio);
     }
@@ -67,6 +75,7 @@ export async function fetchSTT(params: STTParams): Promise<string> {
     let curlJson: any;
     try {
       curlJson = curl2Json(provider.curl);
+      console.log("[STT] fetchSTT — parsed curl URL:", curlJson.url, "method:", curlJson.method);
     } catch (error) {
       throw new Error(
         `Failed to parse curl: ${
@@ -78,11 +87,6 @@ export async function fetchSTT(params: STTParams): Promise<string> {
     // Validate audio file
     const file = audio as File;
     if (file.size === 0) throw new Error("Audio file is empty");
-    // maximum size of 10MB
-    // const maxSize = 10 * 1024 * 1024;
-    // if (file.size > maxSize) {
-    //   warnings.push("Audio exceeds 10MB limit");
-    // }
 
     // Build variable map
     const allVariables = {
@@ -186,6 +190,7 @@ export async function fetchSTT(params: STTParams): Promise<string> {
     }
 
     const fetchFunction = url?.includes("http") ? fetch : tauriFetch;
+    console.log("[STT] fetchSTT — sending request to:", url);
 
     // Send request
     let response: Response;
@@ -199,11 +204,14 @@ export async function fetchSTT(params: STTParams): Promise<string> {
       throw new Error(`Network error: ${e instanceof Error ? e.message : e}`);
     }
 
+    console.log("[STT] fetchSTT — response status:", response.status, response.statusText);
+
     if (!response.ok) {
       let errText = "";
       try {
         errText = await response.text();
       } catch {}
+      console.error("[STT] fetchSTT — HTTP error body:", errText);
       let errMsg: string;
       try {
         const errObj = JSON.parse(errText);
@@ -215,6 +223,7 @@ export async function fetchSTT(params: STTParams): Promise<string> {
     }
 
     const responseText = await response.text();
+    console.log("[STT] fetchSTT — raw response (first 500 chars):", responseText.substring(0, 500));
     let data: any;
     try {
       data = JSON.parse(responseText);
@@ -226,8 +235,10 @@ export async function fetchSTT(params: STTParams): Promise<string> {
     const rawPath = provider.responseContentPath || "text";
     const path = rawPath.charAt(0).toLowerCase() + rawPath.slice(1);
     const transcription = (getByPath(data, path) || "").trim();
+    console.log("[STT] fetchSTT — extracted transcription path:", path, "| result:", transcription.substring(0, 100));
 
     if (!transcription) {
+      console.warn("[STT] fetchSTT — no transcription found at path:", path, "| full data:", JSON.stringify(data).substring(0, 300));
       return [...warnings, "No transcription found"].join("; ");
     }
 
@@ -235,6 +246,7 @@ export async function fetchSTT(params: STTParams): Promise<string> {
     return [...warnings, transcription].filter(Boolean).join("; ");
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
+    console.error("[STT] fetchSTT — caught error:", msg, err);
     throw new Error(msg);
   }
 }
